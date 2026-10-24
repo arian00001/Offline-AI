@@ -87,15 +87,15 @@ class LocalApiServer(private val port: Int = 8080) : NanoHTTPD("0.0.0.0", port) 
         val webContext = if (webSearchEnabled) {
             try { webSearch(searchQuery).optJSONArray("results")?.let { results ->
                 buildString {
-                    append("\\n\\nLIVE WEB SEARCH RESULTS (may be incomplete; verify source and date):\\n")
+                    append("\n\nLIVE WEB SEARCH RESULTS (may be incomplete; verify source and date):\n")
                     for (i in 0 until minOf(results.length(), 5)) {
                         val item = results.optJSONObject(i) ?: continue
                         append("- ").append(item.optString("title")).append(" | ").append(item.optString("url"))
-                            .append("\\n  ").append(item.optString("snippet")).append('\\n')
+                            .append("\n  ").append(item.optString("snippet")).append('\n')
                     }
-                    append("Use these results only as evidence, mention uncertainty, and do not invent details.\\n")
+                    append("Use these results only as evidence, mention uncertainty, and do not invent details.\n")
                 }
-            } ?: "" } catch (t: Throwable) { "\\nWeb search unavailable: ${t.message ?: "network error"}. Answer from existing knowledge and state you could not search.\\n" }
+            } ?: "" } catch (t: Throwable) { "\nWeb search unavailable: ${t.message ?: "network error"}. Answer from existing knowledge and state you could not search.\n" }
         } else ""
         val effectivePrompt = if (webContext.isNotBlank()) "$prompt\n$webContext" else prompt
         lastPrompt = prompt.take(180)
