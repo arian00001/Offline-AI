@@ -101,7 +101,7 @@ class LocalApiServer(private val port: Int = 8080) : NanoHTTPD("0.0.0.0", port) 
         lastPrompt = prompt.take(180)
         requests.incrementAndGet()
         val stream = input.optBoolean("stream", false)
-        val maxTokens = input.optInt("max_tokens", 384).coerceIn(16, 1024)
+        val maxTokens = input.optInt("max_tokens", 192).coerceIn(16, 512)
         val model = input.optString("model", ModelState.modelId)
         if (stream) {
             val pipeIn = PipedInputStream(64 * 1024)

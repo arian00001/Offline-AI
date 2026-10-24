@@ -71,3 +71,13 @@ Model download and initial APK installation require internet. Once a compatible 
 - Lower default web UI output cap (192 tokens) for quicker short answers. The API still accepts a custom max_tokens value.
 
 Important: web search requires internet and is not available offline. A local model does not automatically browse the web; the application must fetch search results and provide them as context. Search results are external, may be stale or blocked, and should be verified. Do not rely on this best-effort HTML adapter for high-stakes facts.
+
+## Fixes in 1.2.0 source update
+
+- Home / Models / Settings navigation is fixed at the bottom of the app.
+- Model downloads are tracked by Android Download Manager and the task ID is saved, so returning to the app restores the same task and its downloaded-byte progress instead of showing a fake completed state. Android Download Manager continues transfers when the app activity is closed; actual continuation depends on Android/network behavior.
+- A model is marked downloaded only after the task succeeds and the file starts with the GGUF magic header. Partial or unverified files are not offered to the model loader.
+- Model files remain in the app-specific `models` storage directory across normal app exits/restarts. Uninstalling the app removes app-specific storage.
+- Chat keeps the latest 8 messages in the request and defaults to 192 output tokens to reduce prompt and generation time. Smaller models are faster; device RAM, thermal throttling and model size still affect speed.
+
+Build validation note: the JavaScript chat file was checked with Node.js syntax validation. Android/Kotlin compilation could not be run in this environment because Gradle distribution download was blocked by unavailable network access; run the GitHub Actions workflow to verify the APK build.

@@ -46,6 +46,8 @@ class MainActivity : Activity() {
     private lateinit var latencyLine: TextView
     private lateinit var logLine: TextView
     private var selectedModel = ModelCatalog.models.first()
+    private val navButtons = linkedMapOf<String, Button>()
+    private var activeTab = "Home"
     private var downloadId = -1L
     private var downloadProgressText: TextView? = null
     private var downloadProgressBar: ProgressBar? = null
@@ -73,9 +75,19 @@ class MainActivity : Activity() {
                                 return
                             }
                             DownloadManager.STATUS_SUCCESSFUL -> {
-                                showDownloadProgress("Download complete · $sizeText. Tap Load model.", 100)
+                                val name = downloadFileName ?: "model.gguf"
+                                val file = modelFile(name)
+                                if (isValidGguf(file)) {
+                                    downloadPrefs().edit().putBoolean("complete:$name", true).remove("active_id").remove("active_file").apply()
+                                    showDownloadProgress("Download complete · $sizeText. Tap Load model.", 100)
+                                    ErrorStore.recordMessage(this@MainActivity, "Model download", "Completed $name ($soFar bytes)")
+                                } else {
+                                    downloadPrefs().edit().putBoolean("complete:$name", false).remove("active_id").remove("active_file").apply()
+                                    file.delete()
+                                    showDownloadProgress("Download response is not a valid GGUF model. Check the source URL and retry.", 0)
+                                    ErrorStore.recordMessage(this@MainActivity, "Model download", "Downloaded file failed GGUF header validation: $name")
+                                }
                                 downloadId = -1L
-                                ErrorStore.recordMessage(this@MainActivity, "Model download", "Completed ${downloadFileName ?: "model"} ($soFar bytes)")
                                 renderModels()
                                 return
                             }
@@ -90,6 +102,7 @@ class MainActivity : Activity() {
                                     else -> "Download failed (reason $reason). Check link, internet and free storage."
                                 }
                                 ErrorStore.recordMessage(this@MainActivity, "Model download", "$message URL=$downloadFileName")
+                                downloadPrefs().edit().remove("active_id").remove("active_file").putBoolean("complete:${downloadFileName ?: "model.gguf"}", false).apply()
                                 downloadId = -1L
                                 showDownloadProgress(message, 0)
                                 toast(message)
@@ -97,7 +110,8 @@ class MainActivity : Activity() {
                             }
                         }
                     } else {
-                        showDownloadProgress("Download task not found. Retry the download.", 0)
+                        showDownloadProgress("Download task not found. Tap Download to retry.", 0)
+                        downloadPrefs().edit().remove("active_id").remove("active_file").apply()
                         downloadId = -1L
                         return
                     }
@@ -123,9 +137,23 @@ class MainActivity : Activity() {
                     (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).query(query).use { cursor ->
                         if (cursor != null && cursor.moveToFirst()) {
                             val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
-                            if (status != DownloadManager.STATUS_SUCCESSFUL) {
+                            val name = downloadFileName ?: downloadPrefs().getString("active_file", null)
+                            if (status == DownloadManager.STATUS_SUCCESSFUL && !name.isNullOrBlank()) {
+                                val file = modelFile(name)
+                                if (isValidGguf(file)) {
+                                    downloadPrefs().edit().putBoolean("complete:$name", true).remove("active_id").remove("active_file").apply()
+                                    message = "Download complete and GGUF file verified."
+                                } else {
+                                    file.delete()
+                                    downloadPrefs().edit().putBoolean("complete:$name", false).remove("active_id").remove("active_file").apply()
+                                    message = "Downloaded file is not a valid GGUF model. Check the URL and retry."
+                                }
+                                downloadId = -1L
+                            } else if (status != DownloadManager.STATUS_SUCCESSFUL) {
                                 val reason = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
-                                message = "Download failed (reason $reason). Check network and free storage."
+                                message = "Download failed (reason $reason). Tap Download to retry."
+                                downloadPrefs().edit().remove("active_id").remove("active_file").apply()
+                                downloadId = -1L
                                 ErrorStore.recordMessage(this@MainActivity, "Model download", message)
                             }
                         }
@@ -143,6 +171,7 @@ class MainActivity : Activity() {
         ErrorStore.installCrashHandler(applicationContext)
         try { if (Build.VERSION.SDK_INT >= 33) registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), Context.RECEIVER_EXPORTED) else registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)) } catch (_: Throwable) {}
         buildShell()
+        restoreDownloadState()
         renderHome()
         handler.post(statsRunnable)
     }
@@ -154,17 +183,37 @@ class MainActivity : Activity() {
         header.addView(TextView(this).apply { text = "Local AI Server"; textSize = 27f; setTextColor(ink); typeface = Typeface.create("sans-serif", Typeface.BOLD) })
         header.addView(TextView(this).apply { text = "PRIVATE BY DESIGN · ON-DEVICE INFERENCE"; textSize = 10f; letterSpacing = .10f; setTextColor(muted) })
         root.addView(header)
-        val nav = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 0, 0, dp(12)) }
-        listOf("Home", "Models", "Settings").forEach { label -> nav.addView(button(label, filled = false) { when (label) { "Home" -> renderHome(); "Models" -> renderModels(); else -> renderSettings() } }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(6) }) }
-        root.addView(nav)
         val scroll = ScrollView(this).apply { clipToPadding = false; isFillViewport = true }
         content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 0, 0, dp(18)) }
         scroll.addView(content)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        // Persistent bottom navigation (instead of tabs at the top).
+        val nav = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(5), dp(7), dp(5), dp(5))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.WHITE); cornerRadius = dp(18).toFloat()
+                setStroke(dp(1), Color.rgb(229, 237, 225))
+            }
+            elevation = dp(5).toFloat()
+        }
+        listOf("Home", "Models", "Settings").forEach { label ->
+            val b = button(label, label == activeTab) {
+                activeTab = label
+                when (label) { "Home" -> renderHome(); "Models" -> renderModels(); else -> renderSettings() }
+                updateBottomNav()
+            }
+            navButtons[label] = b
+            nav.addView(b, LinearLayout.LayoutParams(0, dp(46), 1f).apply { marginStart = dp(3); marginEnd = dp(3) })
+        }
+        root.addView(nav, LinearLayout.LayoutParams(-1, dp(58)).apply { topMargin = dp(5); bottomMargin = dp(2) })
         setContentView(root)
+        updateBottomNav()
     }
 
     private fun renderHome() {
+        activeTab = "Home"; updateBottomNav()
         content.removeAllViews()
         content.addView(card {
             addView(TextView(this@MainActivity).apply { text = "SERVER OVERVIEW"; textSize = 11f; letterSpacing = .12f; setTextColor(muted); typeface = Typeface.DEFAULT_BOLD })
@@ -197,6 +246,7 @@ class MainActivity : Activity() {
     }
 
     private fun renderModels() {
+        activeTab = "Models"; updateBottomNav()
         content.removeAllViews()
         content.addView(bodyText("Choose a model, download it once, then load it. Large files need Wi-Fi and several GB of free space. Start with Qwen3 0.6B to test the full flow; 4B may exceed available RAM."))
         if (downloadId >= 0L) {
@@ -220,10 +270,17 @@ class MainActivity : Activity() {
                     try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(model.url.substringBefore("/resolve/") + "/tree/main"))) }
                     catch (t: Throwable) { ErrorStore.record(this@MainActivity, "Open model source", t); toast("Could not open model source") }
                 }, LinearLayout.LayoutParams(-1, dp(38)))
-                addView(bodyText(if (file.exists()) "Downloaded · ${(file.length() / (1024.0 * 1024)).toInt()} MB" else "Not downloaded"))
+                val complete = isModelComplete(model.file)
+                val existingBytes = if (file.exists()) file.length() else 0L
+                addView(bodyText(when {
+                    complete -> "Downloaded and verified · ${(existingBytes / 1048576L)} MB"
+                    downloadId >= 0L && downloadFileName == model.file -> "Download active · progress shown above"
+                    existingBytes > 0L -> "Partial/unverified file · ${(existingBytes / 1048576L)} MB saved; tap Download to retry safely"
+                    else -> "Not downloaded"
+                }))
                 val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(8), 0, 0) }
-                row.addView(button("Download", false) { startDownload(model.url, model.file) }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(7) })
-                row.addView(button("Load model", true) { loadModel(model) }, LinearLayout.LayoutParams(0, dp(44), 1f))
+                row.addView(button(if (downloadId >= 0L && downloadFileName == model.file) "Downloading…" else if (existingBytes > 0L && !complete) "Retry download" else "Download", false) { startDownload(model.url, model.file) }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(7) })
+                row.addView(button("Load model", true) { loadModel(model) }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { isEnabled = complete })
                 addView(row)
             })
         }
@@ -232,10 +289,10 @@ class MainActivity : Activity() {
             val customFile = modelFile(savedCustomName)
             content.addView(card {
                 addView(TextView(this@MainActivity).apply { text = "Custom · $savedCustomName"; textSize = 16f; setTextColor(ink); typeface = Typeface.DEFAULT_BOLD })
-                addView(bodyText(if (customFile.exists()) "Downloaded · ${(customFile.length() / (1024.0 * 1024)).toInt()} MB" else "Download incomplete or file missing"))
+                addView(bodyText(if (isModelComplete(savedCustomName)) "Downloaded and verified · ${(customFile.length() / (1024.0 * 1024)).toInt()} MB" else if (customFile.exists()) "Partial/unverified file · ${(customFile.length() / (1024.0 * 1024)).toInt()} MB" else "Not downloaded"))
                 addView(button("Load custom model", true) {
                     loadModel(ModelChoice("custom-${savedCustomName.hashCode()}", savedCustomName, "Custom GGUF", savedCustomName, ""))
-                }, LinearLayout.LayoutParams(-1, dp(44)))
+                }.apply { isEnabled = isModelComplete(savedCustomName) }, LinearLayout.LayoutParams(-1, dp(44)))
             })
         }
         content.addView(card {
@@ -282,6 +339,7 @@ class MainActivity : Activity() {
     }
 
     private fun renderSettings() {
+        activeTab = "Settings"; updateBottomNav()
         content.removeAllViews()
         content.addView(card {
             addView(sectionTitle("SERVER SETTINGS"))
@@ -417,11 +475,27 @@ class MainActivity : Activity() {
             val dir = getExternalFilesDir("models") ?: filesDir
             if (!dir.exists() && !dir.mkdirs()) throw IllegalStateException("Could not create model storage directory")
             val existing = File(dir, fileName)
-            if (existing.exists() && existing.length() > 1024 * 1024) {
-                toast("Model file already exists. Tap Load model.")
+            if (isModelComplete(fileName)) {
+                toast("Model is downloaded and verified. Tap Load model.")
                 renderModels()
                 return
             }
+            // If this exact model is already in Download Manager, keep it running and reconnect the UI.
+            val prefs = downloadPrefs()
+            val previousId = prefs.getLong("id:$fileName", -1L)
+            if (previousId >= 0L) {
+                val previousStatus = downloadStatus(previousId)
+                if (previousStatus == DownloadManager.STATUS_PENDING || previousStatus == DownloadManager.STATUS_RUNNING || previousStatus == DownloadManager.STATUS_PAUSED) {
+                    downloadId = previousId; downloadFileName = fileName
+                    prefs.edit().putLong("active_id", previousId).putString("active_file", fileName).apply()
+                    renderModels(); handler.removeCallbacks(downloadPoll); handler.post(downloadPoll)
+                    toast("Existing download restored; Android will continue it in the background.")
+                    return
+                }
+            }
+            // Do not treat a leftover partial file as a completed model.
+            if (existing.exists()) existing.delete()
+            prefs.edit().putBoolean("complete:$fileName", false).apply()
             val request = DownloadManager.Request(parsed)
                 .setTitle("DEV STYLE · $fileName")
                 .setDescription("Downloading GGUF model. In-app progress is shown in Models.")
@@ -431,12 +505,13 @@ class MainActivity : Activity() {
                 .setAllowedOverRoaming(false)
                 .setDestinationInExternalFilesDir(this, "models", fileName)
             val manager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
-            if (downloadId >= 0L) {
-                try { manager.remove(downloadId) } catch (_: Throwable) {}
-                handler.removeCallbacks(downloadPoll)
+            if (downloadId >= 0L && downloadFileName != fileName) {
+                toast("Another model is downloading. Let it finish before starting a second download.")
+                return
             }
             downloadFileName = fileName
             downloadId = manager.enqueue(request)
+            prefs.edit().putLong("id:$fileName", downloadId).putLong("active_id", downloadId).putString("active_file", fileName).putBoolean("complete:$fileName", false).apply()
             ErrorStore.recordMessage(this, "Model download", "Queued $fileName from $url")
             renderModels()
             handler.removeCallbacks(downloadPoll)
@@ -445,6 +520,73 @@ class MainActivity : Activity() {
         } catch (t: Throwable) {
             ErrorStore.record(this, "Model download", t)
             toast("Download could not start: ${t.message ?: t.javaClass.simpleName}")
+        }
+    }
+
+    private fun downloadPrefs() = getSharedPreferences("model_downloads", MODE_PRIVATE)
+
+    private fun downloadStatus(id: Long): Int? = try {
+        val query = DownloadManager.Query().setFilterById(id)
+        (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).query(query).use { cursor ->
+            if (cursor != null && cursor.moveToFirst()) cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)) else null
+        }
+    } catch (_: Throwable) { null }
+
+    private fun isValidGguf(file: File): Boolean {
+        if (!file.isFile || file.length() < 1024 * 1024) return false
+        return try {
+            file.inputStream().use { input ->
+                val header = ByteArray(4)
+                var offset = 0
+                while (offset < header.size) {
+                    val count = input.read(header, offset, header.size - offset)
+                    if (count <= 0) return@use false
+                    offset += count
+                }
+                header.contentEquals(byteArrayOf(71, 71, 85, 70))
+            }
+        } catch (_: Throwable) { false }
+    }
+
+    private fun isModelComplete(fileName: String): Boolean {
+        val file = modelFile(fileName)
+        if (!downloadPrefs().getBoolean("complete:$fileName", false)) {
+            val id = downloadPrefs().getLong("id:$fileName", -1L)
+            if (id >= 0L && downloadStatus(id) == DownloadManager.STATUS_SUCCESSFUL && isValidGguf(file)) {
+                downloadPrefs().edit().putBoolean("complete:$fileName", true).apply()
+            } else return false
+        }
+        if (!isValidGguf(file)) { downloadPrefs().edit().putBoolean("complete:$fileName", false).apply(); return false }
+        return true
+    }
+
+    private fun restoreDownloadState() {
+        val prefs = downloadPrefs()
+        val id = prefs.getLong("active_id", -1L)
+        val name = prefs.getString("active_file", null)
+        if (id < 0L || name.isNullOrBlank()) return
+        when (downloadStatus(id)) {
+            DownloadManager.STATUS_PENDING, DownloadManager.STATUS_RUNNING, DownloadManager.STATUS_PAUSED -> {
+                downloadId = id; downloadFileName = name
+                handler.post(downloadPoll)
+            }
+            DownloadManager.STATUS_SUCCESSFUL -> {
+                downloadId = id; downloadFileName = name
+                handler.post(downloadPoll) // validates the GGUF and clears the active marker
+            }
+            else -> prefs.edit().remove("active_id").remove("active_file").apply()
+        }
+    }
+
+    private fun updateBottomNav() {
+        navButtons.forEach { (label, b) ->
+            val active = label == activeTab
+            b.background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(if (active) green else Color.rgb(244, 248, 241))
+                cornerRadius = dp(13).toFloat()
+                if (!active) setStroke(dp(1), Color.rgb(223, 232, 219))
+            }
+            b.setTextColor(if (active) Color.rgb(32, 51, 22) else ink)
         }
     }
 
@@ -457,7 +599,7 @@ class MainActivity : Activity() {
 
     private fun loadModel(model: ModelChoice) {
         val file = modelFile(model.file)
-        if (!file.exists() || file.length() < 1024 * 1024) { toast("Model file not found or incomplete. Download it first."); return }
+        if (!isModelComplete(model.file) || !isValidGguf(file)) { toast("Model is missing, incomplete, or not verified. Download it first."); return }
         toast("Loading model… first load may take a while")
         io.execute {
             try {
