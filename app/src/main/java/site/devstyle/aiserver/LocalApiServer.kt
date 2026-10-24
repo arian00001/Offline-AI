@@ -9,7 +9,8 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
-class LocalApiServer(private val port: Int = 8080) : NanoHTTPD("127.0.0.1", port) {
+/** Same-Wi-Fi access; use only on a trusted private network (no API authentication). */
+class LocalApiServer(private val port: Int = 8080) : NanoHTTPD("0.0.0.0", port) {
     private val executor = Executors.newCachedThreadPool()
     private val requests = AtomicLong(0)
     @Volatile var lastLatencyMs: Long = 0
@@ -26,6 +27,8 @@ class LocalApiServer(private val port: Int = 8080) : NanoHTTPD("127.0.0.1", port
                     addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
                     addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
                 }
+                session.method == Method.GET && (session.uri == "/" || session.uri == "/chat") -> chatPage()
+                session.method == Method.GET && session.uri == "/runtime/version" -> json(JSONObject().put("version", AppContextHolder.context.getSharedPreferences("runtime_update", android.content.Context.MODE_PRIVATE).getString("version", "1.0.0")))
                 session.method == Method.GET && session.uri == "/health" -> json(JSONObject().put("status", "ok").put("model_loaded", ModelState.loaded).put("service", "DEV STYLE AI Server"))
                 session.method == Method.GET && session.uri == "/v1/models" -> json(JSONObject().put("object", "list").put("data", JSONArray().put(JSONObject().put("id", ModelState.modelId).put("object", "model").put("owned_by", "local"))))
                 session.method == Method.POST && (session.uri == "/v1/chat/completions" || session.uri == "/chat") -> chat(session, start)
@@ -35,6 +38,21 @@ class LocalApiServer(private val port: Int = 8080) : NanoHTTPD("127.0.0.1", port
             lastError = t.message ?: t.javaClass.simpleName
             try { ErrorStore.recordMessage(AppContextHolder.context, "HTTP ${session.method} ${session.uri}", lastError) } catch (_: Throwable) {}
             json(JSONObject().put("error", JSONObject().put("message", lastError)), Response.Status.INTERNAL_ERROR)
+        }
+    }
+
+    private fun chatPage(): Response {
+        val context = AppContextHolder.context
+        val updated = java.io.File(context.filesDir, "runtime/chat.html")
+        val html = if (updated.isFile && updated.length() > 100) {
+            updated.readText(Charsets.UTF_8)
+        } else {
+            context.assets.open("chat.html").bufferedReader(Charsets.UTF_8).use { it.readText() }
+        }
+        return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html).apply {
+            addHeader("Cache-Control", "no-store, max-age=0")
+            addHeader("X-Content-Type-Options", "nosniff")
+            addHeader("Access-Control-Allow-Origin", "*")
         }
     }
 

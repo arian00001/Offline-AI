@@ -1,21 +1,24 @@
-name: DEV STYLE AI Server APK
+name: DEV STYLE AI Server APK and Release
 
 on:
   push:
     branches: [ main, master ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      HAS_SIGNING_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
     steps:
-      - name: Checkout private repository
+      - name: Checkout source
         uses: actions/checkout@v4
 
       - name: Set up Java 17
@@ -24,11 +27,9 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK and install required packages
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          # Install only valid SDK package IDs. Do not request the obsolete
-          # standalone package named "tools".
           packages: 'platform-tools platforms;android-35 build-tools;35.0.0 cmake;3.22.1 ndk;27.2.12479018'
 
       - name: Set up Gradle
@@ -36,31 +37,76 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Validate project files
+      - name: Configure persistent release signing (if secrets are set)
+        if: env.HAS_SIGNING_KEY == 'true'
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/devstyle-release.jks"
+          test -s "$RUNNER_TEMP/devstyle-release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/devstyle-release.jks" >> "$GITHUB_ENV"
+          echo "ANDROID_KEYSTORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+
+      - name: Validate project and runtime manifest
         run: |
           python3 - <<'PYCODE'
-          import xml.etree.ElementTree as ET
+          import hashlib, json, xml.etree.ElementTree as ET
           ET.parse('app/src/main/AndroidManifest.xml')
           assert 'GIT_TAG b10931' in open('app/src/main/cpp/CMakeLists.txt').read()
           assert 'setContentView(root)' in open('app/src/main/java/site/devstyle/aiserver/MainActivity.kt').read()
-          assert 'renderErrors()' in open('app/src/main/java/site/devstyle/aiserver/MainActivity.kt').read()
-          print('Manifest XML and required source markers validated.')
+          assert 'Check Runtime Update' in open('app/src/main/java/site/devstyle/aiserver/MainActivity.kt').read()
+          m=json.load(open('runtime/runtime.json', encoding='utf-8'))
+          assert m['version'] and hashlib.sha256(m['html'].encode()).hexdigest()==m['sha256']
+          assert 'v1/chat/completions' in m['html']
+          print('Manifest, runtime HTML hash, and source markers validated.')
           PYCODE
 
-      - name: Build debug APK
+      - name: Build debug and release APKs
         shell: bash
         run: |
           set -o pipefail
-          gradle --no-daemon --stacktrace assembleDebug 2>&1 | tee build.log
+          gradle --no-daemon --stacktrace assembleDebug assembleRelease 2>&1 | tee build.log
 
-      - name: Upload debug APK
+      - name: Rename release APK for artifact
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/DEV-STYLE-AI-Server-debug.apk
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            cp app/build/outputs/apk/release/app-release.apk dist/DEV-STYLE-AI-Server-release.apk
+          elif [ -f app/build/outputs/apk/release/app-release-unsigned.apk ]; then
+            cp app/build/outputs/apk/release/app-release-unsigned.apk dist/DEV-STYLE-AI-Server-release-UNSIGNED.apk
+          fi
+          if [ "${HAS_SIGNING_KEY:-false}" = "true" ]; then
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify dist/DEV-STYLE-AI-Server-release.apk
+          fi
+
+      - name: Upload APK artifacts
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: dev-style-ai-server-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: dev-style-ai-server-apks
+          path: dist/*.apk
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
+
+      - name: Publish GitHub Release (requires persistent signing secrets)
+        if: startsWith(github.ref, 'refs/tags/v') && env.HAS_SIGNING_KEY == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: DEV STYLE AI Server ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/DEV-STYLE-AI-Server-release.apk
+
+      - name: Explain missing release signing key
+        if: startsWith(github.ref, 'refs/tags/v') && env.HAS_SIGNING_KEY != 'true'
+        run: echo 'Release APK is unsigned. Add the persistent ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD repository secrets to publish an installable update.'
 
       - name: Upload build log for diagnosis
         if: always()
@@ -69,4 +115,4 @@ jobs:
           name: dev-style-ai-server-build-log
           path: build.log
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 30

@@ -1,6 +1,8 @@
 #include <jni.h>
 #include <string>
 #include <vector>
+#include <thread>
+#include <algorithm>
 #include <mutex>
 #include <atomic>
 #include <cstddef>
@@ -66,8 +68,11 @@ Java_site_devstyle_aiserver_NativeLlm_generate(JNIEnv *env, jobject, jstring pro
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = 2048;
     cparams.n_batch = 2048;
-    cparams.n_threads = 4;
-    cparams.n_threads_batch = 4;
+    // Use most CPU cores while leaving capacity for Android/UI.
+    const int cpuCount = (int) std::thread::hardware_concurrency();
+    const int inferenceThreads = std::max(2, std::min(6, cpuCount > 2 ? cpuCount - 2 : 2));
+    cparams.n_threads = inferenceThreads;
+    cparams.n_threads_batch = inferenceThreads;
     llama_context *ctx = llama_init_from_model(g_model, cparams);
     if (!ctx) return env->NewStringUTF("[ERROR] Not enough memory to create context. Try a smaller model or restart the app.");
     llama_sampler *sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());

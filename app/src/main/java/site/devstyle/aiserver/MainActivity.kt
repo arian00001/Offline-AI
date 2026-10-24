@@ -176,8 +176,9 @@ class MainActivity : Activity() {
             addView(apiLine)
             val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(14), 0, 0) }
             row.addView(button("Start API", true) { startServer() }, LinearLayout.LayoutParams(0, dp(46), 1f).apply { marginEnd = dp(7) })
-            row.addView(button("Stop API", false) { stopServer() }, LinearLayout.LayoutParams(0, dp(46), 1f))
+            row.addView(button("Open Chat", false) { openLocalChat() }, LinearLayout.LayoutParams(0, dp(46), 1f))
             addView(row)
+            addView(button("Stop API", false) { stopServer() }, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(8) })
         })
         content.addView(card {
             addView(sectionTitle("LIVE TELEMETRY"))
@@ -190,6 +191,7 @@ class MainActivity : Activity() {
             addView(sectionTitle("QUICK START"))
             addView(bodyText("1. Open Models and download a GGUF model.\n2. Load the downloaded model.\n3. Start API.\n4. Point Jarvis to http://127.0.0.1:8080/v1"))
             addView(bodyText("API endpoints: GET /health · GET /v1/models · POST /v1/chat/completions"))
+            addView(button("Open local AI chat", true) { openLocalChat() }, LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(8) })
         })
         refreshStats()
     }
@@ -258,20 +260,65 @@ class MainActivity : Activity() {
         })
     }
 
+    /** Prefer the Wi-Fi interface address so the copied URL works on another phone. */
+    private fun lanIpv4Address(): String? {
+        return try {
+            val candidates = mutableListOf<Pair<Int, String>>()
+            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+            while (interfaces.hasMoreElements()) {
+                val networkInterface = interfaces.nextElement()
+                if (!networkInterface.isUp || networkInterface.isLoopback) continue
+                val isWifi = networkInterface.name.startsWith("wlan", true) || networkInterface.name.contains("wifi", true)
+                val addresses = networkInterface.inetAddresses
+                while (addresses.hasMoreElements()) {
+                    val address = addresses.nextElement()
+                    if (address is java.net.Inet4Address && !address.isLoopbackAddress && !address.isLinkLocalAddress) {
+                        candidates.add((if (isWifi) 0 else 1) to address.hostAddress)
+                    }
+                }
+            }
+            candidates.sortedBy { it.first }.firstOrNull()?.second
+        } catch (_: Throwable) { null }
+    }
+
     private fun renderSettings() {
         content.removeAllViews()
         content.addView(card {
             addView(sectionTitle("SERVER SETTINGS"))
-            addView(bodyText("Bind address: 127.0.0.1 (this phone only)\nPort: 8080\nAPI base: http://127.0.0.1:8080/v1\nContext length: 2048 tokens\nDefault max output: 384 tokens\nInference: CPU-first for compatibility"))
-            addView(bodyText("Security: API binds only to localhost so other devices on Wi-Fi cannot connect directly. Jarvis on this same phone can use localhost."))
+            val lanIp = lanIpv4Address()
+            addView(bodyText("Bind address: 0.0.0.0 (local network)\nPort: 8080\nThis phone: http://127.0.0.1:8080/\nSame-Wi-Fi chat: ${lanIp?.let { "http://$it:8080/" } ?: "Connect to Wi-Fi, then reopen Settings"}\nAPI base: http://127.0.0.1:8080/v1\nContext length: 2048 tokens\nDefault max output: 384 tokens\nInference: native CPU engine"))
+            addView(bodyText("Same-Wi-Fi use: connect both phones to the same router, start the API, then open the Same-Wi-Fi chat address on the second phone. This API has no login/password, so use it only on a trusted Wi-Fi network."))
         })
         content.addView(card {
             addView(sectionTitle("JARVIS CONNECTION"))
             addView(bodyText("Base URL: http://127.0.0.1:8080/v1\nChat endpoint: POST /chat/completions\nModel id: local-assistant\nStreaming: set \"stream\": true (SSE)"))
-            addView(button("Copy API base URL", false) {
+            addView(button("Copy API base URL (this phone)", false) {
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Local API", "http://127.0.0.1:8080/v1")); toast("API URL copied")
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Local API", "http://127.0.0.1:8080/v1")); toast("Local API URL copied")
             }, LinearLayout.LayoutParams(-1, dp(44)))
+            addView(button("Copy Same-Wi-Fi Chat URL", true) {
+                val ip = lanIpv4Address()
+                if (ip.isNullOrBlank()) toast("Connect this phone to Wi-Fi first")
+                else {
+                    val url = "http://$ip:8080/"
+                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Same-Wi-Fi Chat", url))
+                    toast("Chat URL copied: $url")
+                }
+            }, LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(8) })
+        })
+        content.addView(card {
+            addView(sectionTitle("RUNTIME FEATURE UPDATES"))
+            addView(bodyText("Checks runtime/runtime.json in the Offline-AI GitHub repository. This updates only the HTML chat interface; it does not download a new APK or change native model-engine code. The repository runtime files must be publicly readable by the phone unless you provide a separate public update endpoint."))
+            addView(button("Check Runtime Update", true) {
+                toast("Checking GitHub for runtime updates…")
+                io.execute {
+                    val result = try { RuntimeUpdater.checkAndApply(applicationContext) }
+                    catch (t: Throwable) { ErrorStore.record(this@MainActivity, "Runtime update check", t); "Runtime update failed: ${t.message ?: t.javaClass.simpleName}" }
+                    runOnUiThread { android.app.AlertDialog.Builder(this@MainActivity).setTitle("Runtime Update").setMessage(result).setPositiveButton("OK", null).show() }
+                }
+            }, LinearLayout.LayoutParams(-1, dp(46)))
+            addView(button("Open Local Chat", false) { openLocalChat() }, LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(8) })
         })
         content.addView(card {
             addView(sectionTitle("DIAGNOSTICS"))
@@ -333,13 +380,20 @@ class MainActivity : Activity() {
         })
     }
 
-    private fun startServer() {
-        if (!ModelState.loaded) { toast("Download and load a model first"); renderModels(); return }
+    private fun startServer(): Boolean {
         try {
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(Intent(this, ServerService::class.java)) else startService(Intent(this, ServerService::class.java))
             val ok = ServerController.start()
-            if (ok) { toast("Local API started on port 8080"); renderHome() } else toast("Port 8080 unavailable. Stop other server and retry.")
-        } catch (t: Throwable) { ErrorStore.record(this, "Start API", t); toast("Could not start API: ${t.message}") }
+            if (ok) { toast(if (ModelState.loaded) "Local API started on port 8080" else "Chat page online; load a model to generate answers"); renderHome() }
+            else toast("Port 8080 unavailable. Stop other server and retry.")
+            return ok
+        } catch (t: Throwable) { ErrorStore.record(this, "Start API", t); toast("Could not start API: ${t.message}"); return false }
+    }
+
+    private fun openLocalChat() {
+        if (!startServer()) return
+        try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1:8080/"))) }
+        catch (t: Throwable) { ErrorStore.record(this, "Open local chat", t); toast("Could not open a browser. Visit http://127.0.0.1:8080/ manually.") }
     }
 
     private fun stopServer() {
