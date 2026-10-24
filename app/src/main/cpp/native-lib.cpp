@@ -50,7 +50,7 @@ Java_site_devstyle_aiserver_NativeLlm_generate(JNIEnv *env, jobject, jstring pro
     if (!g_model) return env->NewStringUTF("[ERROR] No model loaded. Load a GGUF model first.");
     g_cancel.store(false);
     const std::string userPrompt = jstringToString(env, prompt);
-    const std::string formatted = "<|im_start|>system\nYou are DEV STYLE, a helpful assistant. Reply in the user's language. Be accurate and concise. /no_think<|im_end|>\n<|im_start|>user\n" + userPrompt + "<|im_end|>\n<|im_start|>assistant\n";
+    const std::string formatted = "<|im_start|>system\nYou are DEV STYLE, a helpful assistant for a Bangladeshi user. The user may write Banglish: Bangla words typed using Latin letters, with informal spelling, abbreviations, and mixed English (examples: 'aita ki bhabe korbo', 'amar phone e cholbe?', 'online e search koro'). Interpret the intended meaning instead of criticizing spelling. If the request is ambiguous, ask one short clarification. Reply in the same style as the user: Banglish when they write Banglish, Bangla script when they write Bangla, English when they write English. Keep simple questions short and begin answering promptly. For coding, give correct code and explain steps clearly. Never claim you searched the web unless web search results were provided in the prompt. Be accurate and concise. /no_think<|im_end|>\n<|im_start|>user\n" + userPrompt + "<|im_end|>\n<|im_start|>assistant\n";
     const llama_vocab *vocab = llama_model_get_vocab(g_model);
     std::vector<llama_token> tokens(formatted.size() + 16);
     int nTokens = llama_tokenize(vocab, formatted.c_str(), (int)formatted.size(), tokens.data(), (int)tokens.size(), true, true);

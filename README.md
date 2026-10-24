@@ -60,3 +60,14 @@ The server listens on the local network (`0.0.0.0:8080`) to support this. **This
 ## Offline operation and speed
 
 Model download and initial APK installation require internet. Once a compatible GGUF model is fully downloaded and loaded, text inference is performed on the server phone using the native llama.cpp engine and can work offline. The second phone uses Wi-Fi only to reach the server; the router does not need internet, but both devices must remain on the same local network. Response speed depends on model size, quantization, prompt length, phone temperature, and available RAM/CPU. This update uses up to six CPU inference threads while reserving cores for Android/UI; it cannot guarantee a particular response time or literally force all hardware to maximum power.
+
+
+## Advanced features in this update
+
+- Optional **Search web (online)** toggle: when enabled, the API attempts a DuckDuckGo HTML search and passes up to five snippets/URLs to the local model. Search is best-effort; websites may block automated requests and the model can still misunderstand results. Turn it off for fully local/offline chat.
+- Streaming chat: generated text appears as tokens arrive, reducing perceived wait time.
+- Banglish-aware system instructions: prompts the model to interpret informal romanized Bangla and reply in the same style. Actual quality still depends on model capability; a small model will not understand every dialect/spelling.
+- Added optional Qwen2.5-Coder 1.5B for coding and Qwen2.5 1.5B Instruct for study/learning, alongside Qwen3 models.
+- Lower default web UI output cap (192 tokens) for quicker short answers. The API still accepts a custom max_tokens value.
+
+Important: web search requires internet and is not available offline. A local model does not automatically browse the web; the application must fetch search results and provide them as context. Search results are external, may be stale or blocked, and should be verified. Do not rely on this best-effort HTML adapter for high-stakes facts.
