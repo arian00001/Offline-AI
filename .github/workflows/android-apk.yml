@@ -24,11 +24,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
+      - name: Set up Android SDK and install required packages
         uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK, CMake and NDK
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;27.2.12479018"
+        with:
+          # Install only valid SDK package IDs. Do not request the obsolete
+          # standalone package named "tools".
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0 cmake;3.22.1 ndk;27.2.12479018'
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
