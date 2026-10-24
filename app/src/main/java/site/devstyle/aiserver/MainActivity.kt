@@ -47,6 +47,68 @@ class MainActivity : Activity() {
     private lateinit var logLine: TextView
     private var selectedModel = ModelCatalog.models.first()
     private var downloadId = -1L
+    private var downloadProgressText: TextView? = null
+    private var downloadProgressBar: ProgressBar? = null
+    private var downloadFileName: String? = null
+    private val downloadPoll = object : Runnable {
+        override fun run() {
+            val id = downloadId
+            if (id < 0L) return
+            try {
+                val query = DownloadManager.Query().setFilterById(id)
+                (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).query(query).use { cursor ->
+                    if (cursor != null && cursor.moveToFirst()) {
+                        val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+                        val soFar = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)).coerceAtLeast(0L)
+                        val total = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+                        val percent = if (total > 0L) ((soFar * 100L) / total).toInt().coerceIn(0, 100) else 0
+                        val sizeText = if (total > 0L) "${soFar / 1048576} / ${total / 1048576} MB" else "${soFar / 1048576} MB received"
+                        when (status) {
+                            DownloadManager.STATUS_PENDING -> showDownloadProgress("Preparing download… $sizeText", percent)
+                            DownloadManager.STATUS_RUNNING -> showDownloadProgress("Downloading ${downloadFileName ?: "model"} · $percent% · $sizeText", percent)
+                            DownloadManager.STATUS_PAUSED -> {
+                                val reason = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
+                                showDownloadProgress("Download paused (reason $reason). Check connection/storage.", percent)
+                                handler.postDelayed(this, 1500)
+                                return
+                            }
+                            DownloadManager.STATUS_SUCCESSFUL -> {
+                                showDownloadProgress("Download complete · $sizeText. Tap Load model.", 100)
+                                downloadId = -1L
+                                ErrorStore.recordMessage(this@MainActivity, "Model download", "Completed ${downloadFileName ?: "model"} ($soFar bytes)")
+                                renderModels()
+                                return
+                            }
+                            DownloadManager.STATUS_FAILED -> {
+                                val reason = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
+                                val message = when (reason) {
+                                    DownloadManager.ERROR_INSUFFICIENT_SPACE -> "Not enough free storage."
+                                    DownloadManager.ERROR_DEVICE_NOT_FOUND -> "Download storage is unavailable."
+                                    DownloadManager.ERROR_HTTP_DATA_ERROR -> "Network data error."
+                                    DownloadManager.ERROR_UNHANDLED_HTTP_CODE -> "Server rejected the link (HTTP error). Use a direct GGUF download URL."
+                                    DownloadManager.ERROR_CANNOT_RESUME -> "Download could not resume; retry it."
+                                    else -> "Download failed (reason $reason). Check link, internet and free storage."
+                                }
+                                ErrorStore.recordMessage(this@MainActivity, "Model download", "$message URL=$downloadFileName")
+                                downloadId = -1L
+                                showDownloadProgress(message, 0)
+                                toast(message)
+                                return
+                            }
+                        }
+                    } else {
+                        showDownloadProgress("Download task not found. Retry the download.", 0)
+                        downloadId = -1L
+                        return
+                    }
+                }
+            } catch (t: Throwable) {
+                ErrorStore.record(this@MainActivity, "Download progress", t)
+                showDownloadProgress("Could not read download status: ${t.message}", 0)
+            }
+            handler.postDelayed(this, 900)
+        }
+    }
     private var customUrlInput: EditText? = null
     private var customNameInput: EditText? = null
     private var testInput: EditText? = null
@@ -134,12 +196,28 @@ class MainActivity : Activity() {
 
     private fun renderModels() {
         content.removeAllViews()
-        content.addView(bodyText("Choose a model, download it once, then load it. Large files need Wi-Fi and several GB of free space."))
+        content.addView(bodyText("Choose a model, download it once, then load it. Large files need Wi-Fi and several GB of free space. Start with Qwen3 0.6B to test the full flow; 4B may exceed available RAM."))
+        if (downloadId >= 0L) {
+            content.addView(card {
+                addView(sectionTitle("MODEL DOWNLOAD PROGRESS"))
+                downloadProgressText = bodyText("Connecting to Hugging Face…")
+                addView(downloadProgressText)
+                downloadProgressBar = ProgressBar(this@MainActivity, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; progress = 0 }
+                addView(downloadProgressBar, LinearLayout.LayoutParams(-1, dp(8)).apply { topMargin = dp(8); bottomMargin = dp(8) })
+                addView(bodyText("Keep the app installed and leave enough free storage. Download runs through Android Download Manager."))
+            })
+            handler.removeCallbacks(downloadPoll)
+            handler.post(downloadPoll)
+        }
         ModelCatalog.models.forEach { model ->
             val file = modelFile(model.file)
             content.addView(card {
                 addView(TextView(this@MainActivity).apply { text = model.title; textSize = 17f; setTextColor(ink); typeface = Typeface.DEFAULT_BOLD })
                 addView(bodyText(model.detail))
+                addView(button("Open Hugging Face source", false) {
+                    try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(model.url.substringBefore("/resolve/") + "/tree/main"))) }
+                    catch (t: Throwable) { ErrorStore.record(this@MainActivity, "Open model source", t); toast("Could not open model source") }
+                }, LinearLayout.LayoutParams(-1, dp(38)))
                 addView(bodyText(if (file.exists()) "Downloaded · ${(file.length() / (1024.0 * 1024)).toInt()} MB" else "Not downloaded"))
                 val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(8), 0, 0) }
                 row.addView(button("Download", false) { startDownload(model.url, model.file) }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(7) })
@@ -168,8 +246,10 @@ class MainActivity : Activity() {
             addView(button("Download custom model", true) {
                 val name = customNameInput?.text?.toString()?.trim().orEmpty()
                 val url = customUrlInput?.text?.toString()?.trim().orEmpty()
-                if (!name.endsWith(".gguf", true) || !url.startsWith("https://") || !url.contains("/")) toast("Enter a .gguf filename and HTTPS direct URL")
-                else {
+                val isHuggingFacePage = url.contains("huggingface.co/") && !url.contains("/resolve/")
+                if (!name.endsWith(".gguf", true) || !url.startsWith("https://") || !url.contains("/") || isHuggingFacePage) {
+                    toast("Use a direct HTTPS .gguf file URL. Hugging Face links must contain /resolve/main/ (not /blob/main/).")
+                } else {
                     val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_")
                     getSharedPreferences("models", MODE_PRIVATE).edit().putString("custom_file", safeName).apply()
                     startDownload(url, safeName)
@@ -270,19 +350,55 @@ class MainActivity : Activity() {
     }
 
     private fun startDownload(url: String, fileName: String) {
-        if (!url.startsWith("https://")) { toast("HTTPS link required"); return }
+        val parsed = try { Uri.parse(url) } catch (_: Throwable) { null }
+        if (parsed == null || parsed.scheme != "https" || parsed.host.isNullOrBlank()) {
+            toast("Enter a valid direct HTTPS model file URL")
+            return
+        }
+        if (!fileName.endsWith(".gguf", true) || fileName.contains("..") || fileName.contains('/')) {
+            toast("Model filename must end in .gguf")
+            return
+        }
         try {
             val dir = getExternalFilesDir("models") ?: filesDir
-            if (!dir.exists()) dir.mkdirs()
-            val request = DownloadManager.Request(Uri.parse(url))
+            if (!dir.exists() && !dir.mkdirs()) throw IllegalStateException("Could not create model storage directory")
+            val existing = File(dir, fileName)
+            if (existing.exists() && existing.length() > 1024 * 1024) {
+                toast("Model file already exists. Tap Load model.")
+                renderModels()
+                return
+            }
+            val request = DownloadManager.Request(parsed)
                 .setTitle("DEV STYLE · $fileName")
-                .setDescription("Downloading AI model. Keep several GB free.")
+                .setDescription("Downloading GGUF model. In-app progress is shown in Models.")
+                .setMimeType("application/octet-stream")
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                .setAllowedOverMetered(true).setAllowedOverRoaming(false)
+                .setAllowedOverMetered(true)
+                .setAllowedOverRoaming(false)
                 .setDestinationInExternalFilesDir(this, "models", fileName)
-            downloadId = (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
-            toast("Download queued. Progress is in Android notifications.")
-        } catch (t: Throwable) { ErrorStore.record(this, "Model download", t); toast("Download failed: ${t.message}") }
+            val manager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+            if (downloadId >= 0L) {
+                try { manager.remove(downloadId) } catch (_: Throwable) {}
+                handler.removeCallbacks(downloadPoll)
+            }
+            downloadFileName = fileName
+            downloadId = manager.enqueue(request)
+            ErrorStore.recordMessage(this, "Model download", "Queued $fileName from $url")
+            renderModels()
+            handler.removeCallbacks(downloadPoll)
+            handler.post(downloadPoll)
+            toast("Download started. Open Models to watch live progress.")
+        } catch (t: Throwable) {
+            ErrorStore.record(this, "Model download", t)
+            toast("Download could not start: ${t.message ?: t.javaClass.simpleName}")
+        }
+    }
+
+    private fun showDownloadProgress(message: String, percent: Int) {
+        runOnUiThread {
+            downloadProgressText?.text = message
+            downloadProgressBar?.progress = percent
+        }
     }
 
     private fun loadModel(model: ModelChoice) {
@@ -330,5 +446,5 @@ class MainActivity : Activity() {
     }
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
-    override fun onDestroy() { try { unregisterReceiver(downloadReceiver) } catch (_: Throwable) {}; handler.removeCallbacks(statsRunnable); super.onDestroy() }
+    override fun onDestroy() { try { unregisterReceiver(downloadReceiver) } catch (_: Throwable) {}; handler.removeCallbacks(statsRunnable); handler.removeCallbacks(downloadPoll); io.shutdown(); super.onDestroy() }
 }
